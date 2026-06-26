@@ -105,10 +105,24 @@ SAMPLE_TEXT = (
     "解放双手，不用再为割草浪费时间，轻松拥有整洁庭院，闭眼入不踩雷。"
 )
 
-# —— 翻译 System Prompt ——
-TRANSLATION_SYSTEM_PROMPT = (
+# —— 翻译风格 & 场景预设 ——
+STYLE_PRESETS: Dict[str, str] = {
+    "美式自然": "Use a casual, friendly American English style with natural conversational flow. Sound like a US native creator.",
+    "英式自然": "Use a polished British English style with understated wit, dry humor, and natural rhythm. Sound like a UK native creator.",
+    "街头潮流": "Use bold, energetic Gen Z slang, internet culture references, and hype-driven language. Heavy on viral energy.",
+    "商务正式": "Use professional, concise business English suitable for corporate presentations and B2B communication.",
+}
+
+SCENE_PRESETS: Dict[str, str] = {
+    "TikTok / Reels": "Optimize for TikTok/Reels short-video format: hook in first 3 seconds, fast-paced delivery, viral energy, heavy use of trends and hashtags.",
+    "LinkedIn": "Optimize for LinkedIn: professional credibility, industry insights tone, thought-leadership phrasing, data-driven persuasion.",
+    "YouTube": "Optimize for YouTube: slightly longer explanations, strong personality, natural pacing with pauses, conversational deep-dive style.",
+}
+
+# —— 翻译 Base System Prompt ——
+TRANSLATION_BASE_PROMPT = (
     "You are a world-class copywriter and translator specializing in short-form video "
-    "commerce scripts (like TikTok Shop, Instagram Reels, live-selling).\n\n"
+    "commerce scripts.\n\n"
     "Translate the given Chinese script into English that sounds like a NATIVE English "
     "speaker is doing a live-selling pitch. The output must:\n"
     "- Sound 100% natural and conversational — as if spoken, not read.\n"
@@ -118,9 +132,39 @@ TRANSLATION_SYSTEM_PROMPT = (
     "descriptions, strong value propositions, and a clear call-to-action.\n"
     "- NEVER sound like a literal translation or textbook English.\n"
     "- Preserve emojis if the source contains them; otherwise add a few fitting emojis "
-    "sparingly to match the platform vibe.\n\n"
-    "Output ONLY the translated English script. No explanations, no notes, no markdown fences."
+    "sparingly to match the platform vibe."
 )
+
+
+def build_translation_prompt(
+    style: str,
+    scene: str,
+    style_custom: str = "",
+    scene_custom: str = "",
+) -> str:
+    """根据风格和场景动态构建 System Prompt。
+
+    Args:
+        style: 翻译风格（STYLE_PRESETS key 或 "自定义"）。
+        scene: 场景（SCENE_PRESETS key 或 "自定义"）。
+        style_custom: style 为 "自定义" 时的自定义描述。
+        scene_custom: scene 为 "自定义" 时的自定义描述。
+
+    Returns:
+        完整的 System Prompt 字符串。
+    """
+    parts = [TRANSLATION_BASE_PROMPT]
+
+    style_desc = style_custom if style == "自定义" else STYLE_PRESETS.get(style, "")
+    scene_desc = scene_custom if scene == "自定义" else SCENE_PRESETS.get(scene, "")
+
+    if style_desc:
+        parts.append(f"\n**Style directive**: {style_desc}")
+    if scene_desc:
+        parts.append(f"\n**Platform directive**: {scene_desc}")
+
+    parts.append("\n\nOutput ONLY the translated English script. No explanations, no notes, no markdown fences.")
+    return "".join(parts)
 
 
 # ===================================================================
@@ -146,11 +190,12 @@ def _get_elevenlabs_client() -> ElevenLabs:
     return ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
 
-def translate_cn_to_en(text: str) -> str:
+def translate_cn_to_en(text: str, system_prompt: str = "") -> str:
     """调用 DeepSeek API，将中文口播文案翻译为地道英文。
 
     Args:
         text: 用户输入的中文文本。
+        system_prompt: 动态构建的 System Prompt（为空时使用默认基础 Prompt）。
 
     Returns:
         翻译后的英文文本。
@@ -158,6 +203,9 @@ def translate_cn_to_en(text: str) -> str:
     Raises:
         RuntimeError: 所有重试均失败时抛出。
     """
+    if not system_prompt:
+        system_prompt = build_translation_prompt("美式自然", "TikTok / Reels")
+
     client = _get_deepseek_client()
     last_error: Optional[Exception] = None
 
@@ -167,7 +215,7 @@ def translate_cn_to_en(text: str) -> str:
             response = client.chat.completions.create(
                 model=DEEPSEEK_TRANSLATION_MODEL,
                 messages=[
-                    {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
                 temperature=0.9,  # 稍高温度增加表达多样性
@@ -716,6 +764,41 @@ def main() -> None:
     with tab_gen:
         user_input = render_input_section()
 
+        # ── 翻译参数下拉选择 ──
+        st.divider()
+        st.caption("🎯 翻译参数设置")
+        col_style, col_scene = st.columns(2)
+
+        with col_style:
+            style = st.selectbox(
+                "翻译风格",
+                options=list(STYLE_PRESETS.keys()) + ["自定义"],
+                index=0,
+                key="style_select",
+            )
+            style_custom = ""
+            if style == "自定义":
+                style_custom = st.text_input(
+                    "描述你想要的翻译风格",
+                    placeholder="例如：澳大利亚口音、轻松随意的冲浪风格…",
+                    key="style_custom",
+                )
+
+        with col_scene:
+            scene = st.selectbox(
+                "目标场景",
+                options=list(SCENE_PRESETS.keys()) + ["自定义"],
+                index=0,
+                key="scene_select",
+            )
+            scene_custom = ""
+            if scene == "自定义":
+                scene_custom = st.text_input(
+                    "描述目标平台或场景",
+                    placeholder="例如：Pinterest 种草、播客广告…",
+                    key="scene_custom",
+                )
+
         # ── 按钮限制逻辑（AND 关系） ──
         now = time.time()
         cooldown_remaining = BUTTON_COOLDOWN_SEC - (now - st.session_state.last_click_time)
@@ -749,11 +832,13 @@ def main() -> None:
             st.session_state.last_click_time = time.time()
             st.session_state.is_processing = True
 
+            system_prompt = build_translation_prompt(style, scene, style_custom, scene_custom)
+
             try:
                 # --- 翻译 ---
                 with st.status("🤖 正在进行地道英文翻译…", expanded=True) as status:
                     try:
-                        english_text = translate_cn_to_en(user_input.strip())
+                        english_text = translate_cn_to_en(user_input.strip(), system_prompt)
                         status.update(label="✅ 翻译完成！", state="running")
                     except Exception as exc:
                         status.update(label=f"❌ 翻译失败: {exc}", state="error")
