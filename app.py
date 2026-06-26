@@ -7,6 +7,8 @@
 再通过 ElevenLabs 并发生成双音色英文音频。
 """
 
+import base64
+import json
 import os
 import re
 import time
@@ -14,7 +16,7 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -264,6 +266,283 @@ def generate_dual_audio(text: str) -> Dict[str, Optional[bytes]]:
 
 
 # ===================================================================
+# 逐句高亮辅助
+# ===================================================================
+
+def split_sentences(text: str) -> List[str]:
+    """将英文文本按句子拆分。
+
+    按句号、感叹号、问号后的空格拆分，保留标点附着在句尾。
+
+    Args:
+        text: 英文文本。
+
+    Returns:
+        句子列表。若无法拆分则返回包含全文的单元素列表。
+    """
+    raw = re.split(r"(?<=[.!?])\s+", text)
+    sentences = [s.strip() for s in raw if s.strip()]
+    return sentences if sentences else [text.strip()]
+
+
+def _build_audio_player_html(
+    english_text: str,
+    audio_results: Dict[str, Optional[bytes]],
+) -> str:
+    """构建带逐句高亮的自包含音频播放器 HTML。
+
+    通过字符数比例估算每句的时间区间，音频播放时
+    JavaScript 端根据 currentTime 实时高亮当前句子。
+
+    Args:
+        english_text: 英文翻译文本。
+        audio_results: {voice_label: audio_bytes_or_None} 字典。
+
+    Returns:
+        完整的 HTML 字符串，可直接传给 st.components.v1.html。
+    """
+    sentences = split_sentences(english_text)
+    sentences_json = json.dumps(sentences)
+
+    # 将音频 bytes 转为 base64 data URI
+    audio_b64: Dict[str, str] = {}
+    for label, audio_bytes in audio_results.items():
+        if audio_bytes is not None:
+            b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            audio_b64[label] = f"data:audio/mp3;base64,{b64}"
+
+    voice_a_b64 = audio_b64.get("Voice A (女声)", "")
+    voice_b_b64 = audio_b64.get("Voice B (男声)", "")
+
+    # 默认选中第一个可用的音色
+    default_label = "Voice A (女声)" if voice_a_b64 else "Voice B (男声)"
+    default_src = voice_a_b64 or voice_b_b64
+
+    # ── HTML / CSS / JS（自包含） ──────────────────────────────────
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0e1117;
+    color: #e0e0e0;
+    padding: 12px 16px;
+}}
+.voice-tabs {{
+    display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap;
+}}
+.voice-tab {{
+    padding: 7px 18px;
+    border: 1px solid #444;
+    background: transparent;
+    color: #aaa;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}}
+.voice-tab.active {{
+    background: #1a5fb4; border-color: #3584e4; color: #fff;
+}}
+.voice-tab:hover:not(.active) {{ border-color: #888; color: #fff; }}
+.audio-container {{ margin-bottom: 18px; }}
+audio {{ width: 100%; border-radius: 6px; outline: none; }}
+.text-container {{
+    max-height: 420px;
+    overflow-y: auto;
+    padding: 14px 16px;
+    background: #16191f;
+    border-radius: 8px;
+    border: 1px solid #2a2d35;
+    line-height: 2;
+    font-size: 15px;
+}}
+.sentence {{
+    display: inline;
+    padding: 2px 5px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.25s, color 0.25s, box-shadow 0.25s;
+}}
+.sentence.played {{ color: #aaa; }}
+.sentence.active {{
+    background: #1a5fb4;
+    color: #fff;
+    font-weight: 600;
+    box-shadow: 0 0 8px rgba(53,132,228,0.35);
+}}
+.sentence.pending {{ color: #777; }}
+.sentence:hover:not(.active) {{ background: #252830; }}
+.download-row {{
+    display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap;
+}}
+.download-btn {{
+    padding: 6px 14px;
+    border: 1px solid #444;
+    background: transparent;
+    color: #ccc;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    text-decoration: none;
+    transition: all 0.2s;
+}}
+.download-btn:hover {{ border-color: #888; color: #fff; }}
+</style>
+</head>
+<body>
+
+<div class="voice-tabs" id="voiceTabs"></div>
+<div class="audio-container">
+    <audio id="ap" controls preload="auto"></audio>
+</div>
+<div class="text-container" id="textContainer"></div>
+<div class="download-row">
+    <a class="download-btn" id="dlA" download="voiceover_Voice_A.mp3">⬇ Voice A (女声)</a>
+    <a class="download-btn" id="dlB" download="voiceover_Voice_B.mp3">⬇ Voice B (男声)</a>
+</div>
+
+<script>
+const sentences = {sentences_json};
+const sources = {{
+    "Voice A (女声)": {json.dumps(voice_a_b64)},
+    "Voice B (男声)": {json.dumps(voice_b_b64)}
+}};
+let boundaries = [];
+let currentLabel = {json.dumps(default_label)};
+
+const ap = document.getElementById("ap");
+const tc = document.getElementById("textContainer");
+const vt = document.getElementById("voiceTabs");
+const dlA = document.getElementById("dlA");
+const dlB = document.getElementById("dlB");
+
+// ── voice tabs ──────────────────────────────────
+Object.entries(sources).forEach(([label, src], idx) => {{
+    if (!src) return;
+    const btn = document.createElement("button");
+    btn.className = "voice-tab" + (label === currentLabel ? " active" : "");
+    btn.textContent = label;
+    btn.onclick = function() {{ switchVoice(label); }};
+    vt.appendChild(btn);
+}});
+
+// ── download links ──────────────────────────────
+dlA.href = sources["Voice A (女声)"] || "#";
+dlB.href = sources["Voice B (男声)"] || "#";
+
+// ── sentence spans ──────────────────────────────
+function buildSpans() {{
+    tc.innerHTML = "";
+    sentences.forEach(function(s, i) {{
+        const span = document.createElement("span");
+        span.className = "sentence pending";
+        span.textContent = s + " ";
+        span.dataset.idx = i;
+        span.onclick = function() {{ seekTo(i); }};
+        tc.appendChild(span);
+    }});
+}}
+buildSpans();
+
+// ── boundaries (character-count proportional) ───
+function calcBoundaries() {{
+    const dur = ap.duration;
+    if (!dur || dur <= 0) return;
+    const total = sentences.reduce(function(acc, s) {{ return acc + s.length; }}, 0);
+    let off = 0;
+    boundaries = sentences.map(function(s) {{
+        const st = (off / total) * dur;
+        const en = ((off + s.length) / total) * dur;
+        off += s.length;
+        return {{ start: st, end: en }};
+    }});
+}}
+
+// ── voice switch ────────────────────────────────
+function switchVoice(label) {{
+    const src = sources[label];
+    if (!src) return;
+    const wasPlaying = !ap.paused;
+    const saved = ap.currentTime;
+    currentLabel = label;
+    ap.src = src;
+
+    vt.querySelectorAll(".voice-tab").forEach(function(tab) {{
+        tab.classList.toggle("active", tab.textContent === label);
+    }});
+
+    ap.addEventListener("loadedmetadata", function() {{
+        calcBoundaries();
+        if (wasPlaying && saved < ap.duration) {{
+            ap.currentTime = saved;
+            ap.play();
+        }}
+    }}, {{ once: true }});
+    ap.load();
+}}
+
+// ── seek on sentence click ──────────────────────
+function seekTo(idx) {{
+    if (boundaries.length === 0) calcBoundaries();
+    if (boundaries.length === 0) return;
+    ap.currentTime = boundaries[idx].start;
+    if (ap.paused) ap.play();
+    updateHighlight();
+}}
+
+// ── highlight current sentence ──────────────────
+function updateHighlight() {{
+    if (boundaries.length === 0) calcBoundaries();
+    if (boundaries.length === 0) return;
+    const ct = ap.currentTime;
+    let active = -1;
+    for (var i = 0; i < boundaries.length; i++) {{
+        if (ct >= boundaries[i].start && ct < boundaries[i].end) {{
+            active = i; break;
+        }}
+    }}
+    if (active === -1 && ct >= boundaries[boundaries.length - 1].end) {{
+        active = boundaries.length - 1;
+    }}
+
+    const spans = tc.querySelectorAll(".sentence");
+    spans.forEach(function(sp, i) {{
+        sp.classList.remove("active", "played", "pending");
+        if (i < active) sp.classList.add("played");
+        else if (i === active) sp.classList.add("active");
+        else sp.classList.add("pending");
+    }});
+
+    if (active >= 0) {{
+        spans[active].scrollIntoView({{ behavior: "smooth", block: "center" }});
+    }}
+}}
+
+// ── events ──────────────────────────────────────
+ap.addEventListener("loadedmetadata", calcBoundaries);
+ap.addEventListener("timeupdate", updateHighlight);
+ap.addEventListener("play", function() {{ calcBoundaries(); updateHighlight(); }});
+ap.addEventListener("seeked", updateHighlight);
+ap.addEventListener("ended", function() {{
+    tc.querySelectorAll(".sentence").forEach(function(sp) {{
+        sp.classList.remove("active"); sp.classList.add("played");
+    }});
+}});
+
+// ── initial load ────────────────────────────────
+ap.src = sources[currentLabel] || "";
+</script>
+</body>
+</html>"""
+    return html
+
+
+# ===================================================================
 # Streamlit UI
 # ===================================================================
 
@@ -323,24 +602,35 @@ def render_translation_section(english_text: str) -> None:
         st.text(english_text)
 
 
-def render_audio_section(audio_results: Dict[str, Optional[bytes]]) -> None:
-    """渲染音频播放区，并排展示两个音色的播放器。
+def render_audio_section(audio_results: Dict[str, Optional[bytes]], english_text: str) -> None:
+    """渲染带逐句高亮的音频播放区。
+
+    使用自定义 HTML 组件实现：
+    - 双音色切换
+    - 播放时英文文本随进度逐句高亮
+    - 点击句子跳转到对应播放位置
+    - 下载按钮
 
     Args:
         audio_results: {voice_label: audio_bytes_or_None} 字典。
+        english_text: 英文翻译文本，用于逐句拆分和高亮。
     """
-    st.subheader("🔊 第二步：双音色语音（并发生成）")
+    st.subheader("🔊 第二步：双音色语音（并发生成 + 逐句高亮）")
     st.caption(
         f"使用 ElevenLabs `{ELEVENLABS_MODEL}` 模型，"
         f"输出格式 `{ELEVENLABS_OUTPUT_FORMAT}`。"
     )
 
-    labels = list(audio_results.keys())
-    if len(labels) == 0:
+    if not audio_results:
         st.warning("没有生成任何音频。")
         return
 
-    # 并排展示：有多于一个音色时用 st.columns
+    # ── 逐句高亮播放器 ──
+    player_html = _build_audio_player_html(english_text, audio_results)
+    st.components.v1.html(player_html, height=600, scrolling=False)
+
+    # ── 下载按钮（Streamlit 原生，更可靠） ──
+    labels = list(audio_results.keys())
     if len(labels) >= 2:
         col_left, col_right = st.columns(2)
         columns = [col_left, col_right]
@@ -351,19 +641,17 @@ def render_audio_section(audio_results: Dict[str, Optional[bytes]]) -> None:
         audio_bytes = audio_results[label]
         col = columns[idx] if idx < len(columns) else st
         with col:
-            st.markdown(f"**{label}**")
             if audio_bytes is not None:
-                st.audio(audio_bytes, format="audio/mp3")
-                # 也提供下载按钮
                 safe_label = re.sub(r"[^\w.-]", "_", label)
                 st.download_button(
                     label=f"⬇ 下载 {label}.mp3",
                     data=audio_bytes,
                     file_name=f"voiceover_{safe_label}.mp3",
                     mime="audio/mpeg",
+                    key=f"dl_{safe_label}",
                 )
             else:
-                st.error("生成失败，无音频数据。")
+                st.error(f"「{label}」生成失败，无音频数据。")
 
 
 def render_history() -> None:
@@ -455,7 +743,7 @@ def main() -> None:
         # --- 展示结果 ---
         render_translation_section(english_text)
         if audio_results:
-            render_audio_section(audio_results)
+            render_audio_section(audio_results, english_text)
 
         # --- 写入历史记录 ---
         st.session_state.history.append({
