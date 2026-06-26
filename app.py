@@ -573,7 +573,7 @@ def render_input_section() -> str:
     Returns:
         用户输入的中文文本。
     """
-    st.subheader("📝 第一步：输入中文口播文案")
+    st.subheader("📝 文案输入")
     user_input = st.text_area(
         label="中文口播文本",
         value=SAMPLE_TEXT,
@@ -615,7 +615,7 @@ def render_audio_section(audio_results: Dict[str, Optional[bytes]], english_text
         audio_results: {voice_label: audio_bytes_or_None} 字典。
         english_text: 英文翻译文本，用于逐句拆分和高亮。
     """
-    st.subheader("🔊 第二步：双音色语音（并发生成 + 逐句高亮）")
+    st.subheader("🔊 双音色语音生成")
     st.caption(
         f"使用 ElevenLabs `{ELEVENLABS_MODEL}` 模型，"
         f"输出格式 `{ELEVENLABS_OUTPUT_FORMAT}`。"
@@ -625,33 +625,9 @@ def render_audio_section(audio_results: Dict[str, Optional[bytes]], english_text
         st.warning("没有生成任何音频。")
         return
 
-    # ── 逐句高亮播放器 ──
+    # ── 逐句高亮播放器（含双音色切换 + 下载按钮） ──
     player_html = _build_audio_player_html(english_text, audio_results)
     st.components.v1.html(player_html, height=600, scrolling=False)
-
-    # ── 下载按钮（Streamlit 原生，更可靠） ──
-    labels = list(audio_results.keys())
-    if len(labels) >= 2:
-        col_left, col_right = st.columns(2)
-        columns = [col_left, col_right]
-    else:
-        columns = [st]
-
-    for idx, label in enumerate(labels):
-        audio_bytes = audio_results[label]
-        col = columns[idx] if idx < len(columns) else st
-        with col:
-            if audio_bytes is not None:
-                safe_label = re.sub(r"[^\w.-]", "_", label)
-                st.download_button(
-                    label=f"⬇ 下载 {label}.mp3",
-                    data=audio_bytes,
-                    file_name=f"voiceover_{safe_label}.mp3",
-                    mime="audio/mpeg",
-                    key=f"dl_{safe_label}",
-                )
-            else:
-                st.error(f"「{label}」生成失败，无音频数据。")
 
 
 def render_history() -> None:
