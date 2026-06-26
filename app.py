@@ -558,7 +558,30 @@ def setup_page() -> None:
         "输入中文带货/短视频口播文案，一键生成**地道英文翻译**和**双音色英文音频**，"
         "让运营同学快速产出海外短视频内容。"
     )
-    st.divider()
+
+    # ── 导航栏样式：选中标签页暗色 ──
+    st.markdown("""
+    <style>
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        padding: 10px 24px;
+        color: #888;
+        font-size: 15px;
+        font-weight: 500;
+        background: transparent;
+        border: none;
+        transition: all 0.2s;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        background-color: #1e2230;
+        color: #f0f0f0;
+        font-weight: 600;
+    }
+    .stTabs [data-baseweb="tab"]:hover:not([aria-selected="true"]) {
+        color: #ccc;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def init_session_state() -> None:
@@ -633,13 +656,12 @@ def render_audio_section(audio_results: Dict[str, Optional[bytes]], english_text
 def render_history() -> None:
     """渲染历史记录区，遍历 session_state.history 渲染所有历史条目。"""
     if len(st.session_state.history) == 0:
+        st.info("暂无历史记录。在「语音生成」标签页中翻译并生成语音后，历史记录将显示在这里。")
         return
-
-    st.divider()
 
     col_hist_title, col_hist_clear = st.columns([4, 1])
     with col_hist_title:
-        st.subheader(f"📚 历史记录（共 {len(st.session_state.history)} 条 / 上限 {MAX_HISTORY} 条）")
+        st.subheader(f"共 {len(st.session_state.history)} 条记录（上限 {MAX_HISTORY} 条）")
     with col_hist_clear:
         if st.button("🗑 清空历史", type="secondary", use_container_width=True):
             st.session_state.history.clear()
@@ -677,63 +699,69 @@ def main() -> None:
     setup_page()
     init_session_state()
 
-    # ----- 步骤 1：输入 -----
-    user_input = render_input_section()
+    tab_gen, tab_hist = st.tabs(["🎙️ 语音生成", "📚 历史记录"])
 
-    # ----- 步骤 2：翻译 + 语音 -----
-    st.divider()
-    col_btn, col_status = st.columns([1, 3])
+    # =================================================================
+    # 标签页 1：语音生成
+    # =================================================================
+    with tab_gen:
+        user_input = render_input_section()
 
-    with col_btn:
-        translate_clicked = st.button(
-            "🚀 翻译并生成语音",
-            type="primary",
-            use_container_width=True,
-            disabled=not user_input.strip(),
-        )
+        st.divider()
+        col_btn, col_status = st.columns([1, 3])
 
-    if translate_clicked:
-        # --- 翻译 ---
-        with st.status("🤖 正在进行地道英文翻译…", expanded=True) as status:
-            try:
-                english_text = translate_cn_to_en(user_input.strip())
-                status.update(label="✅ 翻译完成！", state="running")
-            except Exception as exc:
-                status.update(label=f"❌ 翻译失败: {exc}", state="error")
-                st.error(f"翻译失败，请重试。错误详情：{exc}")
-                return  # 提前返回，保留历史记录渲染
+        with col_btn:
+            translate_clicked = st.button(
+                "🚀 翻译并生成语音",
+                type="primary",
+                use_container_width=True,
+                disabled=not user_input.strip(),
+            )
 
-        # --- 并发语音合成 ---
-        with st.status("🔊 正在并发生成双音色语音…", expanded=True) as status:
-            try:
-                audio_results = generate_dual_audio(english_text)
-                success_count = sum(1 for v in audio_results.values() if v is not None)
-                status.update(
-                    label=f"✅ 语音生成完成！成功 {success_count}/{len(audio_results)} 路。",
-                    state="complete",
-                )
-            except Exception as exc:
-                status.update(label=f"❌ 语音生成失败: {exc}", state="error")
-                audio_results = {}
+        if translate_clicked:
+            # --- 翻译 ---
+            with st.status("🤖 正在进行地道英文翻译…", expanded=True) as status:
+                try:
+                    english_text = translate_cn_to_en(user_input.strip())
+                    status.update(label="✅ 翻译完成！", state="running")
+                except Exception as exc:
+                    status.update(label=f"❌ 翻译失败: {exc}", state="error")
+                    st.error(f"翻译失败，请重试。错误详情：{exc}")
+                    return
 
-        # --- 展示结果 ---
-        render_translation_section(english_text)
-        if audio_results:
-            render_audio_section(audio_results, english_text)
+            # --- 并发语音合成 ---
+            with st.status("🔊 正在并发生成双音色语音…", expanded=True) as status:
+                try:
+                    audio_results = generate_dual_audio(english_text)
+                    success_count = sum(1 for v in audio_results.values() if v is not None)
+                    status.update(
+                        label=f"✅ 语音生成完成！成功 {success_count}/{len(audio_results)} 路。",
+                        state="complete",
+                    )
+                except Exception as exc:
+                    status.update(label=f"❌ 语音生成失败: {exc}", state="error")
+                    audio_results = {}
 
-        # --- 写入历史记录 ---
-        st.session_state.history.append({
-            "cn": user_input.strip(),
-            "en": english_text,
-            "audios": audio_results,
-        })
-        # 超出上限时移除最旧的记录
-        while len(st.session_state.history) > MAX_HISTORY:
-            st.session_state.history.pop(0)
-        logger.info("历史记录已更新，当前共 %d 条。", len(st.session_state.history))
+            # --- 展示结果 ---
+            render_translation_section(english_text)
+            if audio_results:
+                render_audio_section(audio_results, english_text)
 
-    # ----- 历史记录 -----
-    render_history()
+            # --- 写入历史记录 ---
+            st.session_state.history.append({
+                "cn": user_input.strip(),
+                "en": english_text,
+                "audios": audio_results,
+            })
+            while len(st.session_state.history) > MAX_HISTORY:
+                st.session_state.history.pop(0)
+            logger.info("历史记录已更新，当前共 %d 条。", len(st.session_state.history))
+
+    # =================================================================
+    # 标签页 2：历史记录
+    # =================================================================
+    with tab_hist:
+        render_history()
 
 
 if __name__ == "__main__":
