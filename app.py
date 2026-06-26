@@ -95,6 +95,9 @@ MAX_HISTORY = 20  # 最多保留的历史记录条数，防止内存无限增长
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 1.5  # 指数退避的基数
 
+# —— 按钮冷却 ——
+BUTTON_COOLDOWN_SEC = 10  # 两次点击最小间隔（秒）
+
 # —— 测试用示例文本 ——
 SAMPLE_TEXT = (
     "还在为割草头疼吗？太阳底下忙活大半天，又累又费劲儿，"
@@ -586,8 +589,14 @@ def setup_page() -> None:
 
 def init_session_state() -> None:
     """初始化 session_state 中用于历史记录的数据结构。"""
-    if "history" not in st.session_state:
-        st.session_state.history = []  # 每一项: {cn, en, audios: {label: bytes}}
+    defaults = {
+        "history": [],               # 每一项: {cn, en, audios: {label: bytes}}
+        "last_click_time": 0.0,      # 上次点击按钮的时间戳
+        "is_processing": False,       # 是否正在翻译/生成中
+    }
+    for key, default in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
 
 
 def render_input_section() -> str:
@@ -606,7 +615,7 @@ def render_input_section() -> str:
     )
     char_count = len(user_input.strip())
     if char_count > 0:
-        st.caption(f"已输入 {char_count} 个字符")
+        st.caption(f"已输入 {char_count} 个字符，上限300字符")
     return user_input
 
 
@@ -707,6 +716,18 @@ def main() -> None:
     with tab_gen:
         user_input = render_input_section()
 
+        # ── 按钮限制逻辑（AND 关系） ──
+        now = time.time()
+        cooldown_remaining = BUTTON_COOLDOWN_SEC - (now - st.session_state.last_click_time)
+        in_cooldown = cooldown_remaining > 0
+        is_processing = st.session_state.is_processing
+
+        button_disabled = (
+            not user_input.strip()   # 无输入时禁用
+            or is_processing          # 生成过程中禁用
+            or in_cooldown            # 冷却时间内禁用
+        )
+
         st.divider()
         col_btn, col_status = st.columns([1, 3])
 
@@ -715,47 +736,60 @@ def main() -> None:
                 "🚀 翻译并生成语音",
                 type="primary",
                 use_container_width=True,
-                disabled=not user_input.strip(),
+                disabled=button_disabled,
             )
 
+        # ── 冷却 / 处理状态提示 ──
+        if is_processing:
+            st.info("⏳ 正在翻译并生成语音，请稍候…")
+        elif in_cooldown and user_input.strip():
+            st.caption(f"⏳ 请等待 {cooldown_remaining:.0f} 秒后再点击")
+
         if translate_clicked:
-            # --- 翻译 ---
-            with st.status("🤖 正在进行地道英文翻译…", expanded=True) as status:
-                try:
-                    english_text = translate_cn_to_en(user_input.strip())
-                    status.update(label="✅ 翻译完成！", state="running")
-                except Exception as exc:
-                    status.update(label=f"❌ 翻译失败: {exc}", state="error")
-                    st.error(f"翻译失败，请重试。错误详情：{exc}")
-                    return
+            st.session_state.last_click_time = time.time()
+            st.session_state.is_processing = True
 
-            # --- 并发语音合成 ---
-            with st.status("🔊 正在并发生成双音色语音…", expanded=True) as status:
-                try:
-                    audio_results = generate_dual_audio(english_text)
-                    success_count = sum(1 for v in audio_results.values() if v is not None)
-                    status.update(
-                        label=f"✅ 语音生成完成！成功 {success_count}/{len(audio_results)} 路。",
-                        state="complete",
-                    )
-                except Exception as exc:
-                    status.update(label=f"❌ 语音生成失败: {exc}", state="error")
-                    audio_results = {}
+            try:
+                # --- 翻译 ---
+                with st.status("🤖 正在进行地道英文翻译…", expanded=True) as status:
+                    try:
+                        english_text = translate_cn_to_en(user_input.strip())
+                        status.update(label="✅ 翻译完成！", state="running")
+                    except Exception as exc:
+                        status.update(label=f"❌ 翻译失败: {exc}", state="error")
+                        st.error(f"翻译失败，请重试。错误详情：{exc}")
+                        return
 
-            # --- 展示结果 ---
-            render_translation_section(english_text)
-            if audio_results:
-                render_audio_section(audio_results, english_text)
+                # --- 并发语音合成 ---
+                with st.status("🔊 正在并发生成双音色语音…", expanded=True) as status:
+                    try:
+                        audio_results = generate_dual_audio(english_text)
+                        success_count = sum(1 for v in audio_results.values() if v is not None)
+                        status.update(
+                            label=f"✅ 语音生成完成！成功 {success_count}/{len(audio_results)} 路。",
+                            state="complete",
+                        )
+                    except Exception as exc:
+                        status.update(label=f"❌ 语音生成失败: {exc}", state="error")
+                        audio_results = {}
 
-            # --- 写入历史记录 ---
-            st.session_state.history.append({
-                "cn": user_input.strip(),
-                "en": english_text,
-                "audios": audio_results,
-            })
-            while len(st.session_state.history) > MAX_HISTORY:
-                st.session_state.history.pop(0)
-            logger.info("历史记录已更新，当前共 %d 条。", len(st.session_state.history))
+                # --- 展示结果 ---
+                render_translation_section(english_text)
+                if audio_results:
+                    render_audio_section(audio_results, english_text)
+
+                # --- 写入历史记录 ---
+                st.session_state.history.append({
+                    "cn": user_input.strip(),
+                    "en": english_text,
+                    "audios": audio_results,
+                })
+                while len(st.session_state.history) > MAX_HISTORY:
+                    st.session_state.history.pop(0)
+                logger.info("历史记录已更新，当前共 %d 条。", len(st.session_state.history))
+
+            finally:
+                st.session_state.is_processing = False
 
     # =================================================================
     # 标签页 2：历史记录
